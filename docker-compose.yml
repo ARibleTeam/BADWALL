@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  badwall-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: badwall-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Монтируем .env файл для удобства (опционально, можно убрать если не нужен)
+      - ./.env:/app/.env:ro
+    # Логирование
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Ограничения ресурсов (опционально)
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
