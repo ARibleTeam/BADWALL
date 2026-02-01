@@ -1,6 +1,7 @@
 from typing import Any, Awaitable, Callable, Dict, Optional
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
+from aiogram.enums import ChatType
 from check_swear import SwearingCheck
 from config import PROFANITY_THRESHOLD, ALLOWED_CHAT_IDS
 from utils.statistics import Statistics
@@ -22,8 +23,14 @@ class ProfanityMiddleware(BaseMiddleware):
     ) -> Any:
         # Проверяем только сообщения
         if isinstance(event, Message):
-            # Проверяем, что сообщение из разрешенного чата
             chat_id = event.chat.id
+            chat_type = event.chat.type
+            
+            # Личные сообщения пропускаем без проверки (модерация только для групп)
+            if chat_type == ChatType.PRIVATE:
+                return await handler(event, data)
+            
+            # Для групповых чатов проверяем разрешенные чаты
             if chat_id not in ALLOWED_CHAT_IDS:
                 # Игнорируем сообщения из неразрешенных чатов
                 return
