@@ -8,7 +8,7 @@ from aiogram import BaseMiddleware, Bot
 from aiogram.types import Message, TelegramObject, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ChatType, ChatMemberStatus, MessageEntityType
 from check_swear import SwearingCheck
-from config import PROFANITY_THRESHOLD, ALLOWED_CHAT_IDS, ADMIN_IDS
+from config import PROFANITY_THRESHOLD, ALLOWED_CHAT_IDS, ADMIN_IDS, EXEMPT_SENDER_CHAT_IDS
 from utils.statistics import Statistics
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,113 @@ except ImportError:
     PYDUB_AVAILABLE = False
     logger.warning("pydub не установлен. Конвертация аудио может быть недоступна.")
 
+try:
+    import emoji as emoji_lib
+    EMOJI_AVAILABLE = True
+except ImportError:
+    EMOJI_AVAILABLE = False
+    logger.warning("emoji не установлен. Фильтр мусора будет использовать запасной режим (запрещённые символы).")
+
+
+class SmartProfanityFilter:
+    """
+    Фильтр мусора: удаляет бессмысленный текст, псевдографику, спам-символы.
+    Разрешает латиницу, если в тексте есть осмысленные слова из словаря (привет, ok, hello и т.д.).
+    """
+    ALLOWED_LATIN_WORDS = frozenset({
+        'privet', 'poka', 'kak', 'dela', 'zdarova', 'spasibo', 'spasiba',
+        'pozhaluysta', 'pozaluista', 'proshu', 'izvini', 'pon', 'ponyatno',
+        'ya', 'ty', 'oni', 'my', 'govorit', 'govoru', 'dumat',
+        'est', 'budet', 'bylo', 'horosho', 'ploho', 'luchshe', 'ochen',
+        "ochen'", 'segodnya', 'zavtra', 'vchera', 'seychas', 'potom',
+        'smotri', 'slushay', 'davay', 'day', 'ne', 'net', 'da',
+        'ocenka', 'ocenite', 'otsenite', 'otsenka', 'pzhlst', 'pls',
+        'hello', 'hi', 'hey', 'how', 'are', 'you', 'what', 'is', 'it',
+        'thanks', 'thank', "you're", 'welcome', 'yes', 'no', 'ok', 'okay',
+        'please', 'sorry', 'excuse', 'good', 'bad', 'best', 'love', 'like',
+        'very', 'much', 'many', 'top', 'sigma', 'skibidi', 'brainrot',
+        'pov', 'lol', 'lmao', 'omg', 'idk', 'tbh', 'fr', 'real',
+        'when', 'where', 'why', 'who', 'which', 'that', 'this',
+        'can', 'could', 'will', 'would', 'should', 'must', 'maybe',
+        'people', 'friend', 'bro', 'sis', 'mom', 'dad', 'family',
+        'time', 'day', 'night', 'morning', 'afternoon', 'evening',
+        'work', 'school', 'home', 'game', 'play', 'watch', 'see',
+        'think', 'know', 'want', 'need', 'have', 'has', 'had',
+        'ruskom', 'ruskomu',
+    })
+    ALLOWED_SMILEYS = frozenset({'^^', ':)', ':(', ':D', ';)', '^_^', ':-)', ':-(', ':-D'})
+    GARBAGE_PATTERN = re.compile(
+        r'[⬛⬜🔲🔳✅❎✖️➕➖➗™©®‼⁉±√∞≈≠≤≥←↑→↓↔↕↖↗↘↙◀▶⏏️⏩⏪⏫⏬⏺️⏭️⏮️⏯️⏸️⏹️]|'
+        r'[\u2500-\u257F]|'
+        r'[\u2580-\u259F]|'
+        r'[\u25A0-\u25FF]|'
+        r'┻|┳|┣|┫|╋|━|┃',
+        re.UNICODE
+    )
+
+    def __init__(self):
+        pass
+
+    def _count_letters(self, text: str) -> int:
+        """Считает количество русских и латинских букв."""
+        return len(re.findall(r'[a-zA-Zа-яА-ЯёЁ]', text))
+
+    def _count_garbage_chars(self, text: str) -> int:
+        """Считает количество явно мусорных символов (без учёта эмодзи)."""
+        if not EMOJI_AVAILABLE:
+            return len(self.GARBAGE_PATTERN.findall(text))
+        text_no_emoji = emoji_lib.replace_emoji(text, '')
+        return len(self.GARBAGE_PATTERN.findall(text_no_emoji))
+
+    def _contains_allowed_latin_word(self, text: str) -> bool:
+        """Проверяет, есть ли в тексте разрешённое латинское слово."""
+        words = re.findall(r'\b[a-zA-Z]+\b', text.lower())
+        return any(w in self.ALLOWED_LATIN_WORDS for w in words)
+
+    def is_garbage(self, text: str) -> bool:
+        """
+        Возвращает True, если сообщение считается мусором (удалить).
+        """
+        if not text:
+            return False
+        text = text.strip()
+        letter_count = self._count_letters(text)
+
+        if letter_count < 3:
+            if letter_count == 0:
+                if EMOJI_AVAILABLE and emoji_lib.emoji_count(text) > 0:
+                    return False
+                if text in self.ALLOWED_SMILEYS:
+                    return False
+                return True
+            if self._contains_allowed_latin_word(text):
+                return False
+            if re.search(r'[a-zA-Z]', text):
+                return True
+            return False
+
+        if self._contains_allowed_latin_word(text):
+            return False
+
+        if EMOJI_AVAILABLE:
+            text_no_emoji = emoji_lib.replace_emoji(text, '')
+        else:
+            text_no_emoji = text
+        garbage_count = self._count_garbage_chars(text_no_emoji)
+        if garbage_count > letter_count * 2:
+            excessive_punctuation = len(re.findall(r'[!?.,:;\-]{5,}', text_no_emoji))
+            if excessive_punctuation and garbage_count - excessive_punctuation < letter_count:
+                return False
+            return True
+
+        exotic_chars = re.findall(
+            r'[^\u0000-\u007F\u0400-\u04FF\s\d\.,!?:;()\[\]{}"\'«»—…]',
+            text
+        )
+        if len(exotic_chars) > letter_count:
+            return True
+        return False
+
 
 class ProfanityMiddleware(BaseMiddleware):
     """
@@ -36,7 +143,7 @@ class ProfanityMiddleware(BaseMiddleware):
     - Проверка текстовых сообщений на мат с использованием ML-модели
     - Проверка голосовых сообщений (расшифровка и проверка на мат)
     - Проверка на наличие ссылок (URL, t.me, telegram.me)
-    - Проверка на запрещенные символы (спецсимволы и нерусские буквы)
+    - Проверка на мусор (бессмысленный текст, псевдографика, спам; латиница разрешена, если есть осмысленные слова)
     - Автоматическое удаление нарушающих сообщений
     - Бан пользователей за мат (с уведомлениями админам)
     - Сбор статистики по всем типам модерации
@@ -44,7 +151,7 @@ class ProfanityMiddleware(BaseMiddleware):
     
     Порядок проверок:
     1. Проверка прав администратора (админы пропускаются)
-    2. Проверка запрещенных символов (удаление сообщения)
+    2. Проверка на мусор (удаление сообщения)
     3. Проверка ссылок (удаление сообщения)
     4. Проверка на мат (удаление + бан пользователя)
     
@@ -76,7 +183,18 @@ class ProfanityMiddleware(BaseMiddleware):
             r'[@#$%^&*+=|\\/<>~`]',
             re.UNICODE
         )
-    
+        self.garbage_filter = SmartProfanityFilter() if EMOJI_AVAILABLE else None
+        self.recognizer = sr.Recognizer() if SPEECH_RECOGNITION_AVAILABLE else None
+
+    def _is_garbage(self, text: str) -> bool:
+        """
+        Возвращает True, если текст считается мусором (нужно удалить).
+        Использует SmartProfanityFilter при установленной библиотеке emoji, иначе запасной режим _has_forbidden_chars.
+        """
+        if self.garbage_filter is not None:
+            return self.garbage_filter.is_garbage(text)
+        return self._has_forbidden_chars(text)
+
     def _has_urls(self, message: Message) -> bool:
         """
         Проверяет наличие ссылок в сообщении.
@@ -475,6 +593,16 @@ class ProfanityMiddleware(BaseMiddleware):
                 # Игнорируем сообщения из неразрешенных чатов
                 return
             
+            # Сообщения от канала владельца или указанного чата не модерируем
+            if event.sender_chat and event.sender_chat.id in EXEMPT_SENDER_CHAT_IDS:
+                chat_title = event.chat.title if hasattr(event.chat, 'title') and event.chat.title else f"Chat {chat_id}"
+                sender_title = getattr(event.sender_chat, "title", None) or f"ID:{event.sender_chat.id}"
+                logger.debug(
+                    f"⏭️ ПРОПУЩЕНО (сообщение от разрешённого чата/канала) | "
+                    f"Chat: {chat_title} ({chat_id}) | sender_chat: {sender_title} (ID: {event.sender_chat.id})"
+                )
+                return await handler(event, data)
+            
             # Получаем информацию об отправителе (для всех типов сообщений)
             sender_id = event.from_user.id if event.from_user else None
             sender_name = event.from_user.username if event.from_user and event.from_user.username else (
@@ -518,19 +646,19 @@ class ProfanityMiddleware(BaseMiddleware):
                         )
                         
                         # Применяем те же проверки, что и для текстовых сообщений
-                        # Проверяем запрещенные символы
-                        if self._has_forbidden_chars(transcribed_text):
+                        # Проверяем на мусор
+                        if self._is_garbage(transcribed_text):
                             try:
                                 await event.delete()
                                 if self.statistics:
                                     self.statistics.add_checked(chat_id)
                                     self.statistics.add_deleted(chat_id, deletion_type="forbidden_chars")
                                 logger.info(
-                                    f"🚫 УДАЛЕНО (голос, запрещенные символы) | Chat: {chat_title} ({chat_id}) | "
+                                    f"🚫 УДАЛЕНО (голос, мусор) | Chat: {chat_title} ({chat_id}) | "
                                     f"User: {sender_name} (ID: {sender_id})"
                                 )
                             except Exception as e:
-                                logger.error(f"❌ ОШИБКА УДАЛЕНИЯ (голос, запрещенные символы): {e}")
+                                logger.error(f"❌ ОШИБКА УДАЛЕНИЯ (голос, мусор): {e}")
                             return
                         
                         # Проверяем на мат
@@ -594,8 +722,8 @@ class ProfanityMiddleware(BaseMiddleware):
                 # Получаем текст сообщения для проверок
                 message_text = event.text or event.caption or ""
                 
-                # Проверяем наличие запрещенных символов (спецсимволы и нерусские буквы)
-                if self._has_forbidden_chars(message_text):
+                # Проверяем на мусор (бессмысленный текст, псевдографика, спам)
+                if self._is_garbage(message_text):
                     try:
                         await event.delete()
                         # Собираем статистику об удалении
@@ -605,14 +733,14 @@ class ProfanityMiddleware(BaseMiddleware):
                         
                         # Логируем удаление
                         logger.info(
-                            f"🚫 УДАЛЕНО (запрещенные символы) | Chat: {chat_title} ({chat_id}) | "
+                            f"🚫 УДАЛЕНО (мусор) | Chat: {chat_title} ({chat_id}) | "
                             f"User: {sender_name} (ID: {sender_id}) | "
                             f"Text: {message_text[:100]}{'...' if len(message_text) > 100 else ''}"
                         )
                     except Exception as e:
                         # Если не удалось удалить (например, нет прав), просто пропускаем
                         logger.error(
-                            f"❌ ОШИБКА УДАЛЕНИЯ (запрещенные символы) | Chat: {chat_title} ({chat_id}) | "
+                            f"❌ ОШИБКА УДАЛЕНИЯ (мусор) | Chat: {chat_title} ({chat_id}) | "
                             f"User: {sender_name} (ID: {sender_id}) | Error: {e}"
                         )
                     # Не вызываем handler, чтобы сообщение не обрабатывалось дальше

@@ -23,6 +23,11 @@ ALLOWED_CHAT_IDS = [int(chat_id.strip()) for chat_id in ALLOWED_CHAT_IDS_STR.spl
 if not ALLOWED_CHAT_IDS:
     raise ValueError("ALLOWED_CHAT_IDS пуст! Укажите хотя бы один chat_id.")
 
+# Список ID чата и канала, от которых сообщения не модерируются (sender_chat.id через запятую).
+# Например: канал, привязанный к группе, и ID самой группы для постов «от имени группы».
+EXEMPT_SENDER_CHAT_IDS_STR = os.getenv("EXEMPT_SENDER_CHAT_IDS", "")
+EXEMPT_SENDER_CHAT_IDS = [int(x.strip()) for x in EXEMPT_SENDER_CHAT_IDS_STR.split(",") if x.strip()]
+
 # Список админов для получения статистики (user_id через запятую)
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
 if not ADMIN_IDS_STR:
