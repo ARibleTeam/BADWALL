@@ -597,7 +597,7 @@ class ProfanityMiddleware(BaseMiddleware):
             if event.sender_chat and event.sender_chat.id in EXEMPT_SENDER_CHAT_IDS:
                 chat_title = event.chat.title if hasattr(event.chat, 'title') and event.chat.title else f"Chat {chat_id}"
                 sender_title = getattr(event.sender_chat, "title", None) or f"ID:{event.sender_chat.id}"
-                logger.debug(
+                logger.info(
                     f"⏭️ ПРОПУЩЕНО (сообщение от разрешённого чата/канала) | "
                     f"Chat: {chat_title} ({chat_id}) | sender_chat: {sender_title} (ID: {event.sender_chat.id})"
                 )
